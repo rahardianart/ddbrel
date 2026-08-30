@@ -274,13 +274,20 @@ unicode IDs, round-trip identity. Plus a property test asserting that lexicograp
 sort key order matches chronological order — a real trap, since a naive timestamp
 format sorts incorrectly the moment it crosses a digit-width boundary.
 
-**Integration against DynamoDB Local in Docker.** No cloud dependency. Covers
-transaction atomicity, cursor correctness across page boundaries, `RemoveAll`
+**Integration against an emulator in Docker.** No cloud dependency. The endpoint
+is read from `DDB_ENDPOINT`, so LocalStack and DynamoDB Local are interchangeable
+and the suite names neither. Covers transaction atomicity, direction isolation,
+resolve-first upsert, cursor correctness across page boundaries, `RemoveAll`
 resumability, and dangling edge to `Missing` reporting.
 
-*Caveat:* DynamoDB Local approximates real DynamoDB and does not model throttling
-at all. Throttle-path behavior is exercised only by client-side fault injection,
-never by the emulator.
+*Caveats:* no emulator models throttling, so `TransactionCanceledException`
+unwrapping is exercised only by client-side fault injection. Both emulators are a
+single local store, so `WithConsistentRead` is indistinguishable from an eventually
+consistent read locally — the dual-item decision rests on strong consistency being
+available on a base-table query in real DynamoDB, which no emulator can confirm or
+refute. `ClientRequestToken` idempotency enforcement in emulators is unverified.
+
+Setup, Compose file, and test wiring: [`docs/testing.md`](../../testing.md).
 
 ## Accepted Limits
 
