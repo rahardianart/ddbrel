@@ -32,6 +32,7 @@ type writeOptions struct {
 
 type queryOptions struct {
 	label      string
+	labelSet   bool
 	lo, hi     string
 	rangeSet   bool
 	limit      int
@@ -67,11 +68,16 @@ func (f queryOptionFunc) applyQuery(q *queryOptions) { f(q) }
 type labelOption string
 
 func (l labelOption) applyWrite(w *writeOptions) { w.label, w.labelSet = string(l), true }
-func (l labelOption) applyQuery(q *queryOptions) { q.label = string(l) }
+func (l labelOption) applyQuery(q *queryOptions) { q.label, q.labelSet = string(l), true }
 
-// WithLabel names the relationship. It defaults to the empty label, which is its
-// own label rather than a wildcard: edges written without one are only matched
-// by queries without one. On RemoveAll it narrows the sweep to that label.
+// WithLabel names the relationship.
+//
+// On writes, omitting it stores the edge under the empty label, which is a label
+// like any other rather than a wildcard.
+//
+// On Out, In and RemoveAll, omitting it matches every label in that direction.
+// WithLabel("") is therefore not the same as passing nothing: it narrows to the
+// edges written without a label.
 func WithLabel(label string) EdgeOption { return labelOption(label) }
 
 // WithSort supplies the sort value of an edge written by Add. The value is

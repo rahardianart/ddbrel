@@ -245,7 +245,14 @@ func (s *Store) queryInput(dir, node string, q queryOptions) (*dynamodb.QueryInp
 		return nil, err
 	}
 
-	prefix := prefixFor(dir, q.label)
+	if q.rangeSet && !q.labelSet {
+		return nil, fmt.Errorf("ddbrel: sort range needs a label: sort values order within a label, not across labels")
+	}
+
+	prefix := dirPrefix(dir)
+	if q.labelSet {
+		prefix = prefixFor(dir, q.label)
+	}
 	values := map[string]types.AttributeValue{
 		":pk": &types.AttributeValueMemberS{Value: node},
 	}
