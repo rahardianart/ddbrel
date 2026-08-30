@@ -13,6 +13,11 @@ const (
 	dirOut = "OUT"
 	dirIn  = "IN"
 
+	// dirRef marks the pointer item. Its sort key carries no sort value, so its
+	// key is fully determined by (from, label, to) and can be addressed with a
+	// GetItem instead of scanning the target's incoming range.
+	dirRef = "REF"
+
 	attrLabel = "Label"
 	attrNode  = "Node"
 	attrSort  = "Sort"
@@ -45,6 +50,14 @@ func dirPrefix(dir string) string { return dir + delim }
 
 func sortKey(dir, label, sort, node string) string {
 	return dir + delim + label + delim + sort + delim + node
+}
+
+// refKey is the pointer item's sort key, held in the target's partition. It is
+// deliberately sort-free: two concurrent writers of the same edge contend on this
+// one key whatever sort values they carry, which is what lets a condition
+// expression settle the race between them.
+func refKey(label, from string) string {
+	return dirRef + delim + label + delim + from
 }
 
 func parseSortKey(sk string) (dir, label, sort, node string, err error) {
