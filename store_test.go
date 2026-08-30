@@ -29,8 +29,16 @@ func TestQueryInput(t *testing.T) {
 		node     string
 		opts     []QueryOption
 		wantCond string
+		wantErr  bool
 		check    func(t *testing.T, in map[string]types.AttributeValue)
 	}{
+		{
+			name:    "sort range without a label is not expressible",
+			dir:     dirOut,
+			node:    "user-1",
+			opts:    []QueryOption{WithSortRange("a", "b")},
+			wantErr: true,
+		},
 		{
 			name:     "prefix query",
 			dir:      dirOut,
@@ -44,9 +52,21 @@ func TestQueryInput(t *testing.T) {
 			},
 		},
 		{
-			name:     "no label",
+			name:     "no label matches every label in the direction",
 			dir:      dirIn,
 			node:     "order-5",
+			wantCond: "#pk = :pk AND begins_with(#sk, :prefix)",
+			check: func(t *testing.T, in map[string]types.AttributeValue) {
+				if got := attrValue(t, in, ":prefix"); got != "IN#" {
+					t.Errorf(":prefix = %q, want %q", got, "IN#")
+				}
+			},
+		},
+		{
+			name:     "explicit empty label is its own label",
+			dir:      dirIn,
+			node:     "order-5",
+			opts:     []QueryOption{WithLabel("")},
 			wantCond: "#pk = :pk AND begins_with(#sk, :prefix)",
 			check: func(t *testing.T, in map[string]types.AttributeValue) {
 				if got := attrValue(t, in, ":prefix"); got != "IN##" {
@@ -88,6 +108,12 @@ func TestQueryInput(t *testing.T) {
 			t.Parallel()
 
 			in, err := s.queryInput(tt.dir, tt.node, newQueryOptions(tt.opts))
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("queryInput = %v, want error", in)
+				}
+				return
+			}
 			if err != nil {
 				t.Fatalf("queryInput: %v", err)
 			}
