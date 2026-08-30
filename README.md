@@ -112,9 +112,21 @@ Each edge is written as **two items in one `TransactWriteItems`**:
 | `user-1` | `OUT#PLACED#20260830T120400Z#order-5` |
 | `order-5` | `IN#PLACED#20260830T120400Z#user-1` |
 
+A third item, the **pointer**, gives the edge one addressable identity:
+
+| PK | SK | Holds |
+|---|---|---|
+| `order-5` | `REF#PLACED#user-1` | the sort value |
+
 ```
 SK = <DIR>#<LABEL>#<sort>#<node-id>      DIR is OUT or IN
+SK = REF#<LABEL>#<node-id>               the pointer, no sort value
 ```
+
+The pointer's key is fully determined by `(from, label, to)`, so resolving an edge
+is one `GetItem` rather than a scan of the target's incoming edges, and two
+concurrent writers of the same edge contend on one key whatever sort values they
+carry. That is what lets a condition expression settle the race between them.
 
 Both directions live in the base table, so **both can be read with
 `ConsistentRead`** — write an edge and read it back immediately from either side.
@@ -135,14 +147,19 @@ unpadded numbers do not.
 | Call | Round trips | Notes |
 |---|---|---|
 | `Out` / `In` | 1 per page | `Query` on the base table |
-| `Add` | 2 | Upserts on `(from, label, to)` |
+| `Add` | 2 | Upserts on `(from, label, to)`; safe under concurrency |
 | `Remove` | 2 | Idempotent |
+| `Has` | 1 | One `GetItem`; constant cost |
 | `AddExact` / `RemoveExact` | 1 | You supply the sort value |
-| `RemoveAll` | 1 + ⌈edges/50⌉ | Not atomic; idempotent and resumable |
+| `RemoveAll` | 1 + ⌈edges/33⌉ | Not atomic; idempotent and resumable |
 
 `Add` and `Remove` resolve the stored sort value first, so re-adding an edge with a
-new sort value *moves* it rather than duplicating it. The `Exact` variants skip
-that lookup and do not detect an existing copy under a different sort value.
+new sort value *moves* it rather than duplicating it. That resolve is a single
+`GetItem` on the edge's pointer item, and the write that follows is conditional on
+it, so concurrent writers of one edge cannot both commit — the loser retries, and
+gives up with `ErrConflict` rather than spinning. The `Exact` variants skip both
+the lookup and the condition, and do not detect an existing copy under a different
+sort value.
 
 Options apply at four different points:
 
@@ -156,8 +173,9 @@ Options apply at four different points:
 Omitting `WithLabel` on a read matches **every** label in that direction.
 `WithLabel("")` is different — it narrows to edges written without a label.
 
-Errors: `ErrInvalidID`, `ErrCursorMismatch`, and `TransactionError`, which unwraps
-DynamoDB's positional `CancellationReasons` into named causes.
+Errors: `ErrInvalidID`, `ErrCursorMismatch`, `ErrConflict`, and `TransactionError`,
+which unwraps DynamoDB's positional `CancellationReasons` into named causes. See
+[`docs/operations.md`](docs/operations.md) for what to do about each.
 
 ## Hydration
 
@@ -221,15 +239,9 @@ curl "localhost:8080/users/user-1/orders?limit=20"
 
 Documented rather than solved.
 
-- **`Add` and `Remove` are O(fan-in of the target).** The resolve step reads the
-  target's whole incoming-label range. Measured at **2 ops/s against a
-  40,000-edge node, versus 1008 ops/s for `AddExact`** — see
-  [`docs/performance.md`](docs/performance.md). Fine for one-to-many; a
-  production incident for many-to-many with a hot target. Use
-  `AddExact`/`RemoveExact` wherever you know the sort value. A pointer-item
-  design that makes this O(1) is agreed but not implemented.
-- **Cardinality is not enforced.** Nothing prevents a second edge where the domain
-  wants one-to-one.
+- **Cardinality above one is not enforced.** An edge cannot be duplicated, but
+  nothing limits how many edges a node has, so a relationship the domain wants to
+  be one-to-one can still gain a second target.
 - **`RemoveAll` is not atomic.** Inverse items live in other partitions, so it is a
   query plus batched transactional deletes — idempotent and resumable instead.
 - **Ordering is nested under label.** A query spanning labels interleaves by label
@@ -242,8 +254,13 @@ Documented rather than solved.
 
 ## Performance
 
-Measured numbers, the fan-in cliff, and what the emulators cannot tell us:
+Measured numbers and what the emulators cannot tell us:
 [`docs/performance.md`](docs/performance.md).
+
+## Operations
+
+Conflict retries, throttling, partial failures, and what each error means in
+production: [`docs/operations.md`](docs/operations.md).
 
 ## Design
 

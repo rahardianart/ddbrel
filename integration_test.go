@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -417,8 +418,11 @@ func TestRemoveAllResumability(t *testing.T) {
 	if err == nil {
 		t.Fatal("RemoveAll survived an injected failure")
 	}
-	if removed != 50 {
-		t.Fatalf("interrupted RemoveAll removed %d, want the first batch of 50", removed)
+	// The batch size is an internal detail — three items per edge against the
+	// 100-item transaction limit. What matters is that the sweep stopped partway
+	// and reported honestly how far it got.
+	if removed == 0 || removed >= total {
+		t.Fatalf("interrupted RemoveAll removed %d, want a partial sweep of %d", removed, total)
 	}
 
 	rest, err := s.RemoveAll(ctx, "user-1")
@@ -594,5 +598,141 @@ func TestRewriteAfterRemoveIsNotSwallowed(t *testing.T) {
 				t.Fatalf("after second remove: %d edges, want 0 — the delete was swallowed as a replay", got)
 			}
 		})
+	}
+}
+
+// TestConcurrentAddDoesNotDuplicate guards the race the pointer item exists to
+// close. resolveSort and the write are two round trips, so before the pointer
+// carried a condition two concurrent Adds with different sort values both
+// resolved "not found" and both committed, leaving the edge stored twice. The
+// corruption was permanent: resolveSort returned the first match, so no later
+// call repaired it.
+func TestConcurrentAddDoesNotDuplicate(t *testing.T) {
+	t.Parallel()
+
+	s, _, _ := newStore(t)
+	ctx := context.Background()
+
+	for trial := 0; trial < 10; trial++ {
+		from := fmt.Sprintf("user-%d", trial)
+
+		var wg sync.WaitGroup
+		errs := make([]error, 4)
+		for i := range errs {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				errs[i] = s.Add(ctx, from, "shared", ddbrel.WithLabel("L"),
+					ddbrel.WithSort(fmt.Sprintf("%03d", i)))
+			}(i)
+		}
+		wg.Wait()
+
+		winners := 0
+		for _, err := range errs {
+			switch {
+			case err == nil:
+				winners++
+			case errors.Is(err, ddbrel.ErrConflict):
+				// gave up after exhausting its retries; acceptable under contention
+			default:
+				t.Fatalf("Add: %v", err)
+			}
+		}
+		if winners == 0 {
+			t.Fatalf("trial %d: every concurrent Add failed", trial)
+		}
+
+		p, err := s.Out(ctx, from, ddbrel.WithLabel("L"), ddbrel.WithConsistentRead())
+		if err != nil {
+			t.Fatalf("Out: %v", err)
+		}
+		if len(p.Edges) != 1 {
+			t.Fatalf("trial %d: %d edges after concurrent Add, want exactly 1: %v",
+				trial, len(p.Edges), edgeStrings(p.Edges))
+		}
+	}
+}
+
+func TestHas(t *testing.T) {
+	t.Parallel()
+
+	s, _, _ := newStore(t)
+	ctx := context.Background()
+
+	if err := s.Add(ctx, "user-1", "order-5", ddbrel.WithLabel("PLACED"), ddbrel.WithSort("s1")); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		from, to string
+		label    string
+		wantOK   bool
+		wantSort string
+	}{
+		{name: "present", from: "user-1", to: "order-5", label: "PLACED", wantOK: true, wantSort: "s1"},
+		{name: "wrong label", from: "user-1", to: "order-5", label: "VIEWED"},
+		{name: "wrong target", from: "user-1", to: "order-9", label: "PLACED"},
+		{name: "reversed", from: "order-5", to: "user-1", label: "PLACED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sort, ok, err := s.Has(ctx, tt.from, tt.to, ddbrel.WithLabel(tt.label))
+			if err != nil {
+				t.Fatalf("Has: %v", err)
+			}
+			if ok != tt.wantOK {
+				t.Fatalf("Has ok = %v, want %v", ok, tt.wantOK)
+			}
+			if ok && sort != tt.wantSort {
+				t.Errorf("Has sort = %q, want %q", sort, tt.wantSort)
+			}
+		})
+	}
+
+	if err := s.Remove(ctx, "user-1", "order-5", ddbrel.WithLabel("PLACED")); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, ok, err := s.Has(ctx, "user-1", "order-5", ddbrel.WithLabel("PLACED")); err != nil || ok {
+		t.Fatalf("Has after Remove = %v (err %v), want false", ok, err)
+	}
+}
+
+// TestRemoveAllRemovesPointers checks the sweep leaves no pointer items behind.
+// They live under a REF# prefix that the OUT#/IN# sweeps never see, so they are
+// deleted via the edges that own them.
+func TestRemoveAllRemovesPointers(t *testing.T) {
+	t.Parallel()
+
+	s, c, table := newStore(t)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		if err := s.Add(ctx, "user-1", fmt.Sprintf("order-%d", i),
+			ddbrel.WithLabel("PLACED"), ddbrel.WithSort(fmt.Sprintf("%03d", i))); err != nil {
+			t.Fatalf("Add: %v", err)
+		}
+	}
+	if err := s.Add(ctx, "session-9", "user-1", ddbrel.WithLabel("AUTH"), ddbrel.WithSort("x")); err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+
+	if _, err := s.RemoveAll(ctx, "user-1"); err != nil {
+		t.Fatalf("RemoveAll: %v", err)
+	}
+
+	out, err := c.Scan(ctx, &dynamodb.ScanInput{TableName: &table, ConsistentRead: aws.Bool(true)})
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(out.Items) != 0 {
+		for _, it := range out.Items {
+			pk, _ := it["PK"].(*types.AttributeValueMemberS)
+			sk, _ := it["SK"].(*types.AttributeValueMemberS)
+			t.Errorf("left behind: PK=%q SK=%q", pk.Value, sk.Value)
+		}
+		t.Fatalf("RemoveAll left %d items", len(out.Items))
 	}
 }

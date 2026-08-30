@@ -14,6 +14,10 @@ var (
 	// it is empty where a value is required, or it contains the key delimiter '#'.
 	ErrInvalidID = errors.New("ddbrel: invalid id")
 
+	// ErrConflict reports that concurrent writers kept moving the same edge and
+	// this call gave up rather than retry indefinitely. Retrying is safe.
+	ErrConflict = errors.New("ddbrel: conflicting concurrent write")
+
 	// ErrCursorMismatch reports a cursor handed to a query whose key range differs
 	// from the one the cursor was produced by. Resuming would silently return
 	// edges from a different node, direction, label or sort range.
@@ -79,4 +83,21 @@ func unwrapTransaction(err error, items []string) error {
 
 func invalidID(what, value string, reason string) error {
 	return fmt.Errorf("ddbrel: %s %q %s: %w", what, value, reason, ErrInvalidID)
+}
+
+// isConditionFailed reports a transaction cancelled because a condition failed,
+// which is how a losing writer of the same edge learns it lost. Any other
+// cancellation reason — throttling, capacity, a validation problem — is a real
+// error and must not be retried as contention.
+func isConditionFailed(err error) bool {
+	var cancelled *types.TransactionCanceledException
+	if !errors.As(err, &cancelled) {
+		return false
+	}
+	for _, r := range cancelled.CancellationReasons {
+		if aws.ToString(r.Code) == "ConditionalCheckFailed" {
+			return true
+		}
+	}
+	return false
 }
