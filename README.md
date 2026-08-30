@@ -169,11 +169,13 @@ curl "localhost:8080/users/user-1/orders?limit=20"
 
 Documented rather than solved.
 
-- **`Add` and `Remove` are O(fan-in of the target).** The resolve step paginates
-  the target's incoming-label range. Fine for one-to-many; **bad for many-to-many
-  with a hot target** — adding a post to a tag with a million posts paginates all
-  of them. Use `AddExact`/`RemoveExact` where you already know the sort value.
-  A pointer-item design that makes this O(1) is agreed but not implemented.
+- **`Add` and `Remove` are O(fan-in of the target).** The resolve step reads the
+  target's whole incoming-label range. Measured at **2 ops/s against a
+  40,000-edge node, versus 1008 ops/s for `AddExact`** — see
+  [`docs/performance.md`](docs/performance.md). Fine for one-to-many; a
+  production incident for many-to-many with a hot target. Use
+  `AddExact`/`RemoveExact` wherever you know the sort value. A pointer-item
+  design that makes this O(1) is agreed but not implemented.
 - **Cardinality is not enforced.** Nothing prevents a second edge where the domain
   wants one-to-one.
 - **`RemoveAll` is not atomic.** Inverse items live in other partitions, so it is a
@@ -182,6 +184,11 @@ Documented rather than solved.
   first, so global chronological ordering across labels is not one query.
 - **Hot partitions.** A node with millions of edges concentrates load. Write
   sharding is out of scope.
+
+## Performance
+
+Measured numbers, the fan-in cliff, and what the emulators cannot tell us:
+[`docs/performance.md`](docs/performance.md).
 
 ## Design
 
