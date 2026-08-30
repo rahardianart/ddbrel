@@ -51,6 +51,58 @@ page, err = store.In(ctx, "order-5", ddbrel.WithLabel("PLACED"))
 Node IDs are opaque strings. **`#` is the key delimiter and is rejected**, so use
 `user-1`, not `USER#1`.
 
+## Direction: `Out` and `In`
+
+`Out` and `In` are not two kinds of edge. They are the two ends of one edge.
+
+`Add(ctx, from, to)` draws an arrow:
+
+```
+Add(ctx, "user-1", "order-5", ddbrel.WithLabel("PLACED"))
+
+              PLACED
+   user-1 ─────────────> order-5
+          (from)          (to)
+```
+
+That single call answers two questions:
+
+| Call | Reads | Returns |
+|---|---|---|
+| `Out("user-1")` | edges pointing **away from** user-1 | this edge |
+| `In("order-5")` | edges pointing **at** order-5 | this edge |
+| `Out("order-5")` | — | nothing |
+| `In("user-1")` | — | nothing |
+
+In plain terms: **`Out` is "what does this node point to", `In` is "what points at
+this node".**
+
+Both are cheap because `Add` wrote both items, in one transaction — the reverse
+direction is not a second edge you maintain, it is already there.
+
+`Edge.From` and `Edge.To` stay stable whichever side you read from. `In("order-5")`
+still returns `From: "user-1", To: "order-5"`; the arrow does not flip.
+
+### Choosing a direction
+
+Because both directions are stored, **`from` versus `to` never limits which
+questions you can ask.** Choose whichever reads naturally as a sentence:
+
+```
+Out("campaign:1") -> its items        In("item:001")     -> campaigns holding it
+Out("item:001")   -> its merchant     In("merchant:7")   -> items it sells
+Out("merchant:7") -> its city         In("city:jakarta") -> merchants there
+```
+
+Two asymmetries to know about:
+
+- **`hydrate.All` only resolves `To`.** Hydrating `In()` results reloads the node
+  you already had rather than the counterparts. See [Known limits](#known-limits).
+- **Write cost depends on the target.** `Add` resolves against the *target's*
+  incoming edges, so its cost is O(fan-in of `to`). `Add(post, tag)` against a
+  popular tag is slow; `Add(tag, post)` is not. Where the semantics allow either,
+  put the high-cardinality side as `from`.
+
 ## How it works
 
 Each edge is written as **two items in one `TransactWriteItems`**:
@@ -184,6 +236,9 @@ Documented rather than solved.
   first, so global chronological ordering across labels is not one query.
 - **Hot partitions.** A node with millions of edges concentrates load. Write
   sharding is out of scope.
+- **`hydrate.All` resolves only the `To` side of an edge.** Hydrating the results
+  of `In()` reloads the queried node rather than its counterparts, so "load the
+  entities pointing at this one" is not expressible today.
 
 ## Performance
 
