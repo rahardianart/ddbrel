@@ -141,7 +141,10 @@ func TestQueryInputOptions(t *testing.T) {
 		t.Fatalf("defaults set an option: %+v", in)
 	}
 
-	c, err := newCursor(dirOut, "user-1", queryOptions{}, lastKey("user-1", "OUT##2026#order-5"), s.codec)
+	// The cursor must come from the same scan direction it resumes: a
+	// LastEvaluatedKey means "continue past this row", which points opposite ways
+	// under WithReverse.
+	c, err := newCursor(dirOut, "user-1", queryOptions{reverse: true}, lastKey("user-1", "OUT##2026#order-5"), s.codec)
 	if err != nil {
 		t.Fatalf("newCursor: %v", err)
 	}
