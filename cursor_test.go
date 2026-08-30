@@ -198,3 +198,45 @@ func TestCursorMismatchAcrossQueryShapes(t *testing.T) {
 		t.Errorf("identical query should resume, got %v", err)
 	}
 }
+
+// TestCursorMismatchOnScanDirection guards silent duplicate pages. A
+// LastEvaluatedKey means "continue past this row", which points opposite ways
+// under WithReverse, so resuming a descending page ascending re-serves rows the
+// caller has already seen with no error.
+func TestCursorMismatchOnScanDirection(t *testing.T) {
+	t.Parallel()
+
+	last := lastKey("n", "OUT#L#003#x")
+	fwd := queryOptions{label: "L", labelSet: true}
+	rev := queryOptions{label: "L", labelSet: true, reverse: true}
+
+	tests := []struct {
+		name      string
+		from, to  queryOptions
+		wantMatch bool
+	}{
+		{"reverse cursor resumed forward", rev, fwd, false},
+		{"forward cursor resumed reverse", fwd, rev, false},
+		{"reverse resumed reverse", rev, rev, true},
+		{"forward resumed forward", fwd, fwd, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := newCursor(dirOut, "n", tt.from, last, defaultCodec())
+			if err != nil {
+				t.Fatalf("newCursor: %v", err)
+			}
+			_, err = c.startKey(dirOut, "n", tt.to, defaultCodec())
+			if tt.wantMatch {
+				if err != nil {
+					t.Errorf("startKey err = %v, want resume", err)
+				}
+				return
+			}
+			if !errors.Is(err, ErrCursorMismatch) {
+				t.Errorf("startKey err = %v, want ErrCursorMismatch", err)
+			}
+		})
+	}
+}

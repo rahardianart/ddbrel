@@ -25,6 +25,7 @@ type cursorPayload struct {
 	Lo       string `json:"lo,omitempty"`
 	Hi       string `json:"hi,omitempty"`
 	RangeSet bool   `json:"rs,omitempty"`
+	Reverse  bool   `json:"rv,omitempty"`
 	SK       string `json:"sk"`
 }
 
@@ -69,19 +70,24 @@ func newCursor(dir, node string, q queryOptions, last map[string]types.Attribute
 		Lo:       q.lo,
 		Hi:       q.hi,
 		RangeSet: q.rangeSet,
+		Reverse:  q.reverse,
 		SK:       sk,
 	}}, nil
 }
 
 // startKey rebuilds the ExclusiveStartKey from the caller's node and the cursor's
-// sort key. Every field that changes the key condition is compared, including the
-// labelSet and rangeSet flags: an omitted label queries every label while
-// WithLabel("") queries only the empty one, so a cursor from one must not resume
-// the other.
+// sort key. Every field that changes which rows follow the start key is compared.
+//
+// That includes the labelSet and rangeSet flags — an omitted label queries every
+// label while WithLabel("") queries only the empty one — and the scan direction.
+// A LastEvaluatedKey means "continue past this row", which points opposite ways
+// under WithReverse: resuming a descending page ascending re-serves rows the
+// caller has already seen, with no error to notice.
 func (c *Cursor) startKey(dir, node string, q queryOptions, cd codec) (map[string]types.AttributeValue, error) {
 	if c.p.Node != node || c.p.Dir != dir ||
 		c.p.Label != q.label || c.p.LabelSet != q.labelSet ||
-		c.p.Lo != q.lo || c.p.Hi != q.hi || c.p.RangeSet != q.rangeSet {
+		c.p.Lo != q.lo || c.p.Hi != q.hi || c.p.RangeSet != q.rangeSet ||
+		c.p.Reverse != q.reverse {
 		return nil, ErrCursorMismatch
 	}
 	return cd.key(node, c.p.SK), nil

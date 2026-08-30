@@ -324,3 +324,43 @@ func TestCodecEdgeRejectsMalformedItems(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateRejectsControlCharacters(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                  string
+		from, to, label, sort string
+	}{
+		{name: "NUL in node id", from: "a\x00b", to: "z", label: "L", sort: "s"},
+		{name: "NUL in target", from: "a", to: "z\x00y", label: "L", sort: "s"},
+		{name: "NUL in label", from: "a", to: "z", label: "b\x00c", sort: "s"},
+		{name: "NUL in sort value", from: "a", to: "z", label: "L", sort: "s\x00t"},
+		{name: "newline", from: "a\nb", to: "z", label: "L", sort: "s"},
+		{name: "tab", from: "a\tb", to: "z", label: "L", sort: "s"},
+		{name: "DEL", from: "a\x7fb", to: "z", label: "L", sort: "s"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateEdge(tt.from, tt.to, tt.label, tt.sort)
+			if !errors.Is(err, ErrInvalidID) {
+				t.Errorf("validateEdge = %v, want ErrInvalidID", err)
+			}
+		})
+	}
+
+	// The ambiguity this closes: these two distinct edges joined to one identity.
+	if err := validateEdge("a\x00b", "z", "c", "s"); err == nil {
+		t.Error("From with NUL accepted")
+	}
+	if err := validateEdge("a", "z", "b\x00c", "s"); err == nil {
+		t.Error("Label with NUL accepted")
+	}
+
+	if err := validateEdge("user-1", "order-5", "PLACED", "20260830T120400Z"); err != nil {
+		t.Errorf("ordinary edge rejected: %v", err)
+	}
+}

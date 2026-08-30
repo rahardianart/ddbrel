@@ -1,6 +1,7 @@
 package hydrate
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -82,8 +83,8 @@ func TestPlan(t *testing.T) {
 	if len(targets) != 2 {
 		t.Fatalf("targets = %d, want 2 (deduplicated)", len(targets))
 	}
-	if targets[0].id != "ORDER:5" || targets[1].id != "ORDER:6" {
-		t.Fatalf("targets out of edge order: %q, %q", targets[0].id, targets[1].id)
+	if targets[0].ids[0] != "ORDER:5" || targets[1].ids[0] != "ORDER:6" {
+		t.Fatalf("targets out of edge order: %q, %q", targets[0].ids, targets[1].ids)
 	}
 	if targets[0].sig == targets[1].sig {
 		t.Error("distinct targets share a key signature")
@@ -311,6 +312,51 @@ func TestKeySignatureMatchesAcrossNumberForms(t *testing.T) {
 		}
 		if a != b {
 			t.Errorf("signatures differ for equal numbers %q and %q: %q vs %q", pair[0], pair[1], a, b)
+		}
+	}
+}
+
+// TestPlanDeduplicatesByEntityKey guards a whole-batch failure: a KeyFunc may map
+// several node IDs onto one row, and duplicate keys in one BatchGetItem make
+// DynamoDB reject the entire chunk, including unrelated entities in it.
+func TestPlanDeduplicatesByEntityKey(t *testing.T) {
+	t.Parallel()
+
+	var r Registry
+	// versioned node ids collapse onto one row
+	r.Register("ORDER:", "orders", func(id string) map[string]types.AttributeValue {
+		base, _, _ := strings.Cut(id, "@")
+		return map[string]types.AttributeValue{"ID": &types.AttributeValueMemberS{Value: base}}
+	})
+
+	targets, err := plan(&r, []ddbrel.Edge{
+		{From: "C", To: "ORDER:5@v1"},
+		{From: "C", To: "ORDER:5@v2"},
+		{From: "C", To: "ORDER:9"},
+	})
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(targets) != 2 {
+		t.Fatalf("targets = %d, want 2 — colliding keys must fetch once", len(targets))
+	}
+	if got := targets[0].ids; len(got) != 2 || got[0] != "ORDER:5@v1" || got[1] != "ORDER:5@v2" {
+		t.Errorf("collapsed target ids = %v, want both versioned ids", got)
+	}
+	if got := targets[1].ids; len(got) != 1 || got[0] != "ORDER:9" {
+		t.Errorf("unrelated target ids = %v", got)
+	}
+
+	// Every node ID must reach Missing, since Sweep matches it against Edge.To.
+	seen := map[string]bool{}
+	for _, tg := range targets {
+		for _, id := range tg.ids {
+			seen[id] = true
+		}
+	}
+	for _, want := range []string{"ORDER:5@v1", "ORDER:5@v2", "ORDER:9"} {
+		if !seen[want] {
+			t.Errorf("node id %q would never be reported missing", want)
 		}
 	}
 }

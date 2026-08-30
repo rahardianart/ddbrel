@@ -12,6 +12,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -99,7 +100,7 @@ type Result[T any] struct {
 }
 
 type target struct {
-	id    string
+	ids   []string
 	table string
 	key   map[string]types.AttributeValue
 	sig   string
@@ -128,12 +129,12 @@ func All[T any](ctx context.Context, c *dynamodb.Client, r *Registry, edges []dd
 	for _, t := range targets {
 		item, ok := found[t.table+"\x00"+t.sig]
 		if !ok {
-			res.Missing = append(res.Missing, t.id)
+			res.Missing = append(res.Missing, t.ids...)
 			continue
 		}
 		var v T
 		if err := attributevalue.UnmarshalMap(item, &v); err != nil {
-			return res, fmt.Errorf("ddbrel/hydrate: unmarshal %q from %q: %w", t.id, t.table, err)
+			return res, fmt.Errorf("ddbrel/hydrate: unmarshal %q from %q: %w", t.ids[0], t.table, err)
 		}
 		res.Items = append(res.Items, v)
 	}
@@ -162,16 +163,21 @@ func Sweep(ctx context.Context, s *ddbrel.Store, edges []ddbrel.Edge, missing []
 	return removed, nil
 }
 
+// plan turns edges into the set of entities to fetch. It deduplicates by the
+// entity key rather than by node ID, because a KeyFunc may legally map several
+// node IDs onto one row — versioned identifiers, or any normalising key function.
+// Deduplicating by node ID let those reach one BatchGetItem as duplicate keys,
+// which DynamoDB rejects with a ValidationException that fails the whole chunk,
+// including every unrelated entity in it.
+//
+// Each target keeps every node ID that resolved to it, so a missing entity is
+// reported once per node ID. Sweep matches Missing against Edge.To, and would
+// otherwise leave the edges of the collapsed IDs behind.
 func plan(r *Registry, edges []ddbrel.Edge) ([]target, error) {
-	seen := make(map[string]struct{}, len(edges))
+	at := make(map[string]int, len(edges))
 	targets := make([]target, 0, len(edges))
 
 	for _, e := range edges {
-		if _, dup := seen[e.To]; dup {
-			continue
-		}
-		seen[e.To] = struct{}{}
-
 		en, ok := r.lookup(e.To)
 		if !ok {
 			return nil, fmt.Errorf("%w: %q", ErrUnregisteredType, e.To)
@@ -181,7 +187,16 @@ func plan(r *Registry, edges []ddbrel.Edge) ([]target, error) {
 		if err != nil {
 			return nil, fmt.Errorf("ddbrel/hydrate: key for %q: %w", e.To, err)
 		}
-		targets = append(targets, target{id: e.To, table: en.table, key: key, sig: sig})
+
+		id := en.table + "\x00" + sig
+		if i, dup := at[id]; dup {
+			if !slices.Contains(targets[i].ids, e.To) {
+				targets[i].ids = append(targets[i].ids, e.To)
+			}
+			continue
+		}
+		at[id] = len(targets)
+		targets = append(targets, target{ids: []string{e.To}, table: en.table, key: key, sig: sig})
 	}
 	return targets, nil
 }

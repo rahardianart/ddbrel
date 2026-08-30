@@ -79,7 +79,21 @@ func validateComponent(what, value string, allowEmpty bool) error {
 	if strings.Contains(value, delim) {
 		return invalidID(what, value, "contains the key delimiter '#'")
 	}
+	if i := strings.IndexFunc(value, isControl); i >= 0 {
+		return invalidID(what, value, fmt.Sprintf("contains control character %#U at byte %d", value[i], i))
+	}
 	return nil
+}
+
+// isControl reports the C0 controls and DEL. They are rejected because several
+// identities are built by joining components with \x00 — RemoveAll's duplicate
+// check joins From, Label, Sort and To that way — and a component containing the
+// separator makes that join ambiguous: From "a\x00b" with label "c" and From "a"
+// with label "b\x00c" produce the same string, so one of two distinct edges is
+// silently skipped. Nothing else in the library needs control characters, and
+// they cannot appear in a well-formed identifier.
+func isControl(r rune) bool {
+	return r < 0x20 || r == 0x7f
 }
 
 func validateEdge(from, to, label, sort string) error {
