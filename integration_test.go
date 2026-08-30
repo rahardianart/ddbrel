@@ -521,3 +521,78 @@ func TestHydrateReportsDanglingEdges(t *testing.T) {
 		}
 	})
 }
+
+// TestRewriteAfterRemoveIsNotSwallowed guards a silent data-loss bug: the
+// ClientRequestToken used to be derived from the write's identity, so an Add
+// after a Remove produced a byte-identical request and DynamoDB replayed it as a
+// no-op inside its 10 minute idempotency window. The call reported success and
+// the edge was never recreated.
+func TestRewriteAfterRemoveIsNotSwallowed(t *testing.T) {
+	t.Parallel()
+
+	s, _, _ := newStore(t)
+	ctx := context.Background()
+
+	count := func(node string) int {
+		t.Helper()
+		p, err := s.Out(ctx, node, ddbrel.WithLabel("L"), ddbrel.WithConsistentRead())
+		if err != nil {
+			t.Fatalf("Out: %v", err)
+		}
+		return len(p.Edges)
+	}
+
+	tests := []struct {
+		name   string
+		add    func() error
+		remove func() error
+	}{
+		{
+			name:   "Add after Remove",
+			add:    func() error { return s.Add(ctx, "u", "o", ddbrel.WithLabel("L"), ddbrel.WithSort("s1")) },
+			remove: func() error { return s.Remove(ctx, "u", "o", ddbrel.WithLabel("L")) },
+		},
+		{
+			name:   "AddExact after RemoveExact",
+			add:    func() error { return s.AddExact(ctx, "u2", "o2", "s1", ddbrel.WithLabel("L")) },
+			remove: func() error { return s.RemoveExact(ctx, "u2", "o2", "s1", ddbrel.WithLabel("L")) },
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := "u"
+			if strings.Contains(tt.name, "Exact") {
+				node = "u2"
+			}
+
+			if err := tt.add(); err != nil {
+				t.Fatalf("first add: %v", err)
+			}
+			if got := count(node); got != 1 {
+				t.Fatalf("after first add: %d edges, want 1", got)
+			}
+
+			if err := tt.remove(); err != nil {
+				t.Fatalf("remove: %v", err)
+			}
+			if got := count(node); got != 0 {
+				t.Fatalf("after remove: %d edges, want 0", got)
+			}
+
+			if err := tt.add(); err != nil {
+				t.Fatalf("second add: %v", err)
+			}
+			if got := count(node); got != 1 {
+				t.Fatalf("after re-add: %d edges, want 1 — the write was swallowed as a replay", got)
+			}
+
+			if err := tt.remove(); err != nil {
+				t.Fatalf("second remove: %v", err)
+			}
+			if got := count(node); got != 0 {
+				t.Fatalf("after second remove: %d edges, want 0 — the delete was swallowed as a replay", got)
+			}
+		})
+	}
+}

@@ -21,8 +21,6 @@ package ddbrel
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -109,7 +107,7 @@ func (s *Store) Remove(ctx context.Context, from, to string, o ...WriteOption) e
 	if !found {
 		return nil
 	}
-	return s.deleteEdges(ctx, "remove", []Edge{{From: from, To: to, Label: w.label, Sort: sort}})
+	return s.deleteEdges(ctx, []Edge{{From: from, To: to, Label: w.label, Sort: sort}})
 }
 
 // RemoveExact deletes the edge at the given sort value without the resolve
@@ -119,7 +117,7 @@ func (s *Store) RemoveExact(ctx context.Context, from, to, sort string, o ...Wri
 	if err := validateEdge(from, to, w.label, sort); err != nil {
 		return err
 	}
-	return s.deleteEdges(ctx, "remove", []Edge{{From: from, To: to, Label: w.label, Sort: sort}})
+	return s.deleteEdges(ctx, []Edge{{From: from, To: to, Label: w.label, Sort: sort}})
 }
 
 // RemoveAll deletes every edge touching node, in both directions, optionally
@@ -149,7 +147,7 @@ func (s *Store) RemoveAll(ctx context.Context, node string, o ...WriteOption) (i
 		if len(batch) == 0 {
 			return nil
 		}
-		if err := s.deleteEdges(ctx, "removeall", batch); err != nil {
+		if err := s.deleteEdges(ctx, batch); err != nil {
 			return err
 		}
 		removed += len(batch)
@@ -359,15 +357,13 @@ func (s *Store) write(ctx context.Context, from, to string, w writeOptions, prev
 	items = append(items, s.putItem(forward), s.putItem(inverse))
 	names = append(names, "forward item put", "inverse item put")
 
-	return s.transact(ctx, items, names,
-		requestToken("add", s.table, from, w.label, to, w.sort, prevSort))
+	return s.transact(ctx, items, names)
 }
 
-func (s *Store) deleteEdges(ctx context.Context, op string, edges []Edge) error {
+func (s *Store) deleteEdges(ctx context.Context, edges []Edge) error {
 	var items []types.TransactWriteItem
 	var names []string
 	seen := make(map[string]struct{}, len(edges)*2)
-	parts := []string{op, s.table}
 
 	for _, e := range edges {
 		keys := [2]struct{ pk, sk, name string }{
@@ -382,19 +378,23 @@ func (s *Store) deleteEdges(ctx context.Context, op string, edges []Edge) error 
 			seen[id] = struct{}{}
 			items = append(items, s.deleteItem(k.pk, k.sk))
 			names = append(names, k.name)
-			parts = append(parts, id)
 		}
 	}
 	if len(items) == 0 {
 		return nil
 	}
-	return s.transact(ctx, items, names, requestToken(parts...))
+	return s.transact(ctx, items, names)
 }
 
-func (s *Store) transact(ctx context.Context, items []types.TransactWriteItem, names []string, token *string) error {
+// transact leaves ClientRequestToken unset. The field carries the SDK's
+// idempotencyToken trait, so aws-sdk-go-v2 generates one per call and reuses it
+// across that call's retries — which is the only replay that must not apply
+// twice. Deriving the token from the write's identity instead made a later,
+// legitimate rewrite of the same edge look like a replay of the earlier one, and
+// DynamoDB silently discarded it inside its 10 minute window.
+func (s *Store) transact(ctx context.Context, items []types.TransactWriteItem, names []string) error {
 	_, err := s.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems:      items,
-		ClientRequestToken: token,
+		TransactItems: items,
 	})
 	if err != nil {
 		return unwrapTransaction(err, names)
@@ -408,16 +408,4 @@ func (s *Store) putItem(item map[string]types.AttributeValue) types.TransactWrit
 
 func (s *Store) deleteItem(pk, sk string) types.TransactWriteItem {
 	return types.TransactWriteItem{Delete: &types.Delete{TableName: aws.String(s.table), Key: s.codec.key(pk, sk)}}
-}
-
-// requestToken derives the ClientRequestToken from the identity of the write, so
-// an SDK-level retry of the same call cannot apply it twice. DynamoDB accepts up
-// to 36 characters.
-func requestToken(parts ...string) *string {
-	h := sha256.New()
-	for _, p := range parts {
-		h.Write([]byte(p))
-		h.Write([]byte{0})
-	}
-	return aws.String(hex.EncodeToString(h.Sum(nil))[:32])
 }
