@@ -1,6 +1,8 @@
 package ddbrel
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -122,5 +124,77 @@ func TestNilCursorString(t *testing.T) {
 	var c *Cursor
 	if c.String() != "" {
 		t.Fatalf("nil cursor String = %q, want empty", c.String())
+	}
+}
+
+// TestCursorCarriesNoPartitionKey pins the wire format: the partition is derived
+// from the node the caller passes, never from the cursor, so a tampered cursor
+// cannot address another partition.
+func TestCursorCarriesNoPartitionKey(t *testing.T) {
+	t.Parallel()
+
+	c, err := newCursor(dirOut, "user-1", queryOptions{}, lastKey("user-1", "OUT##2026#order-5"), defaultCodec())
+	if err != nil {
+		t.Fatalf("newCursor: %v", err)
+	}
+
+	raw, err := base64.RawURLEncoding.DecodeString(c.String())
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := generic["pk"]; present {
+		t.Errorf("cursor payload still carries a partition key: %s", raw)
+	}
+
+	key, err := c.startKey(dirOut, "user-1", queryOptions{}, defaultCodec())
+	if err != nil {
+		t.Fatalf("startKey: %v", err)
+	}
+	if got := key["PK"].(*types.AttributeValueMemberS).Value; got != "user-1" {
+		t.Errorf("start key PK = %q, want the queried node", got)
+	}
+}
+
+func TestCursorMismatchAcrossQueryShapes(t *testing.T) {
+	t.Parallel()
+
+	base := queryOptions{}
+	last := lastKey("n", "OUT#L#001#x")
+
+	tests := []struct {
+		name string
+		from queryOptions
+		to   queryOptions
+	}{
+		{"wildcard vs explicit empty label", queryOptions{}, queryOptions{labelSet: true}},
+		{"explicit empty label vs wildcard", queryOptions{labelSet: true}, queryOptions{}},
+		{"different label", queryOptions{label: "A", labelSet: true}, queryOptions{label: "B", labelSet: true}},
+		{"range vs no range", queryOptions{label: "L", labelSet: true, rangeSet: true},
+			queryOptions{label: "L", labelSet: true}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := newCursor(dirOut, "n", tt.from, last, defaultCodec())
+			if err != nil {
+				t.Fatalf("newCursor: %v", err)
+			}
+			if _, err := c.startKey(dirOut, "n", tt.to, defaultCodec()); !errors.Is(err, ErrCursorMismatch) {
+				t.Errorf("startKey err = %v, want ErrCursorMismatch", err)
+			}
+		})
+	}
+
+	// the matching case still resumes
+	c, err := newCursor(dirOut, "n", base, last, defaultCodec())
+	if err != nil {
+		t.Fatalf("newCursor: %v", err)
+	}
+	if _, err := c.startKey(dirOut, "n", base, defaultCodec()); err != nil {
+		t.Errorf("identical query should resume, got %v", err)
 	}
 }

@@ -14,14 +14,18 @@ type Cursor struct {
 	p cursorPayload
 }
 
+// cursorPayload carries no partition key. The partition is always the node being
+// queried, which the caller passes to Out or In, so storing it would mean trusting
+// a client-supplied value to address a partition. It is derived instead.
 type cursorPayload struct {
-	Node  string `json:"n"`
-	Dir   string `json:"d"`
-	Label string `json:"l"`
-	Lo    string `json:"lo,omitempty"`
-	Hi    string `json:"hi,omitempty"`
-	PK    string `json:"pk"`
-	SK    string `json:"sk"`
+	Node     string `json:"n"`
+	Dir      string `json:"d"`
+	Label    string `json:"l,omitempty"`
+	LabelSet bool   `json:"ls,omitempty"`
+	Lo       string `json:"lo,omitempty"`
+	Hi       string `json:"hi,omitempty"`
+	RangeSet bool   `json:"rs,omitempty"`
+	SK       string `json:"sk"`
 }
 
 // String encodes the cursor as URL-safe base64.
@@ -46,35 +50,39 @@ func ParseCursor(s string) (*Cursor, error) {
 	if err := json.Unmarshal(b, &p); err != nil {
 		return nil, fmt.Errorf("ddbrel: decode cursor: %w", err)
 	}
-	if p.PK == "" || p.SK == "" {
+	if p.Node == "" || p.SK == "" {
 		return nil, fmt.Errorf("ddbrel: decode cursor: missing key")
 	}
 	return &Cursor{p: p}, nil
 }
 
 func newCursor(dir, node string, q queryOptions, last map[string]types.AttributeValue, c codec) (*Cursor, error) {
-	pk, ok := stringAttr(last[c.pk])
-	if !ok {
-		return nil, fmt.Errorf("ddbrel: last evaluated key is missing %q", c.pk)
-	}
 	sk, ok := stringAttr(last[c.sk])
 	if !ok {
 		return nil, fmt.Errorf("ddbrel: last evaluated key is missing %q", c.sk)
 	}
 	return &Cursor{p: cursorPayload{
-		Node:  node,
-		Dir:   dir,
-		Label: q.label,
-		Lo:    q.lo,
-		Hi:    q.hi,
-		PK:    pk,
-		SK:    sk,
+		Node:     node,
+		Dir:      dir,
+		Label:    q.label,
+		LabelSet: q.labelSet,
+		Lo:       q.lo,
+		Hi:       q.hi,
+		RangeSet: q.rangeSet,
+		SK:       sk,
 	}}, nil
 }
 
+// startKey rebuilds the ExclusiveStartKey from the caller's node and the cursor's
+// sort key. Every field that changes the key condition is compared, including the
+// labelSet and rangeSet flags: an omitted label queries every label while
+// WithLabel("") queries only the empty one, so a cursor from one must not resume
+// the other.
 func (c *Cursor) startKey(dir, node string, q queryOptions, cd codec) (map[string]types.AttributeValue, error) {
-	if c.p.Node != node || c.p.Dir != dir || c.p.Label != q.label || c.p.Lo != q.lo || c.p.Hi != q.hi {
+	if c.p.Node != node || c.p.Dir != dir ||
+		c.p.Label != q.label || c.p.LabelSet != q.labelSet ||
+		c.p.Lo != q.lo || c.p.Hi != q.hi || c.p.RangeSet != q.rangeSet {
 		return nil, ErrCursorMismatch
 	}
-	return cd.key(c.p.PK, c.p.SK), nil
+	return cd.key(node, c.p.SK), nil
 }
