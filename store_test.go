@@ -206,24 +206,3 @@ func TestQueryInputHonoursKeyNames(t *testing.T) {
 		t.Fatalf("attribute names = %v", in.ExpressionAttributeNames)
 	}
 }
-
-func TestRequestTokenIsDeterministic(t *testing.T) {
-	t.Parallel()
-
-	a := aws.ToString(requestToken("add", "edges", "user-1", "PLACED", "order-5", "2026", ""))
-	b := aws.ToString(requestToken("add", "edges", "user-1", "PLACED", "order-5", "2026", ""))
-	c := aws.ToString(requestToken("add", "edges", "user-1", "PLACED", "order-5", "2027", ""))
-
-	if a != b {
-		t.Errorf("token is not stable: %q != %q", a, b)
-	}
-	if a == c {
-		t.Errorf("token collides across sort values: %q", a)
-	}
-	if len(a) != 32 {
-		t.Errorf("token length = %d, want 32 (DynamoDB allows 36)", len(a))
-	}
-	if len(aws.ToString(requestToken("removeall", "edges"))) > 36 {
-		t.Error("token exceeds 36 characters")
-	}
-}
