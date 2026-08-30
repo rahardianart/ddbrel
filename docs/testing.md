@@ -40,9 +40,8 @@ services:
       # LocalStack accepts any credentials, but the SDK requires them to exist.
       AWS_DEFAULT_REGION: us-east-1
     healthcheck:
-      test:
-        - CMD-SHELL
-        - curl -sf http://localhost:4566/_localstack/health | grep -qE '"dynamodb": *"(available|running)"'
+      # Quote the whole command: an unquoted '*' starts a YAML alias.
+      test: ["CMD-SHELL", "curl -sf http://localhost:4566/_localstack/health | grep -Eq '\"dynamodb\": ?\"(available|running)\"'"]
       interval: 5s
       timeout: 5s
       retries: 20
