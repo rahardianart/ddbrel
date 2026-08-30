@@ -232,3 +232,85 @@ func TestCountKeys(t *testing.T) {
 		t.Fatalf("countKeys(nil) = %d, want 0", got)
 	}
 }
+
+func TestCanonicalNumber(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{in: "1", want: "1"},
+		{in: "1.00", want: "1"},
+		{in: "0003", want: "3"},
+		{in: "2e2", want: "200"},
+		{in: "2E2", want: "200"},
+		{in: "1e-2", want: "0.01"},
+		{in: "-0.500", want: "-0.5"},
+		{in: "+7", want: "7"},
+		{in: "0", want: "0"},
+		{in: "0.0", want: "0"},
+		{in: "-0", want: "0"},
+		{in: "-0.000", want: "0"},
+		{in: "0003.10", want: "3.1"},
+		{in: "1.5e3", want: "1500"},
+		{in: "123.456", want: "123.456"},
+		{in: ".5", want: "0.5"},
+		{in: "-1e-3", want: "-0.001"},
+		// 38 significant digits must survive intact; a float64 would round here.
+		{in: "12345678901234567890123456789012345678", want: "12345678901234567890123456789012345678"},
+		{in: "0.10000000000000000000000000000000000001", want: "0.10000000000000000000000000000000000001"},
+		{in: "", wantErr: true},
+		{in: "abc", wantErr: true},
+		{in: "1e", wantErr: true},
+		{in: "1.2.3", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.in, func(t *testing.T) {
+			got, err := canonicalNumber(tt.in)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("canonicalNumber(%q) = %q, want error", tt.in, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("canonicalNumber(%q): %v", tt.in, err)
+			}
+			if got != tt.want {
+				t.Errorf("canonicalNumber(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKeySignatureMatchesAcrossNumberForms(t *testing.T) {
+	t.Parallel()
+
+	// The caller's KeyFunc and the key DynamoDB echoes back must sign identically
+	// even when written in different but equal forms.
+	for _, pair := range [][2]string{
+		{"1.00", "1"},
+		{"2e2", "200"},
+		{"0003", "3"},
+		{"-0.500", "-0.5"},
+	} {
+		a, err := keySignature(map[string]types.AttributeValue{
+			"id": &types.AttributeValueMemberN{Value: pair[0]},
+		})
+		if err != nil {
+			t.Fatalf("keySignature(%q): %v", pair[0], err)
+		}
+		b, err := keySignature(map[string]types.AttributeValue{
+			"id": &types.AttributeValueMemberN{Value: pair[1]},
+		})
+		if err != nil {
+			t.Fatalf("keySignature(%q): %v", pair[1], err)
+		}
+		if a != b {
+			t.Errorf("signatures differ for equal numbers %q and %q: %q vs %q", pair[0], pair[1], a, b)
+		}
+	}
+}

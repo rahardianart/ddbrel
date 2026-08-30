@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -307,10 +308,82 @@ func scalar(v types.AttributeValue) (string, error) {
 	case *types.AttributeValueMemberS:
 		return "S:" + t.Value, nil
 	case *types.AttributeValueMemberN:
-		return "N:" + t.Value, nil
+		n, err := canonicalNumber(t.Value)
+		if err != nil {
+			return "", err
+		}
+		return "N:" + n, nil
 	case *types.AttributeValueMemberB:
 		return "B:" + base64.StdEncoding.EncodeToString(t.Value), nil
 	default:
 		return "", errors.New("key attributes must be S, N or B")
+	}
+}
+
+// canonicalNumber renders a DynamoDB number the way DynamoDB stores it, so a key
+// signature built from a caller's KeyFunc matches the one built from the item
+// DynamoDB echoes back. DynamoDB normalises numbers on write — "1.00" returns as
+// "1", "2e2" as "200", "0003" as "3" — and comparing the raw strings put a live
+// entity in Result.Missing, which Sweep would then act on by deleting the edge to
+// it.
+//
+// The transform is textual rather than via a float type, because DynamoDB carries
+// 38 significant digits and any binary float would round them.
+func canonicalNumber(v string) (string, error) {
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return "", errors.New("empty number")
+	}
+
+	sign := ""
+	switch s[0] {
+	case '-':
+		sign, s = "-", s[1:]
+	case '+':
+		s = s[1:]
+	}
+
+	mantissa, exp := s, 0
+	if i := strings.IndexAny(s, "eE"); i >= 0 {
+		e, err := strconv.Atoi(s[i+1:])
+		if err != nil {
+			return "", fmt.Errorf("malformed exponent in %q", v)
+		}
+		mantissa, exp = s[:i], e
+	}
+
+	intPart, fracPart := mantissa, ""
+	if i := strings.IndexByte(mantissa, '.'); i >= 0 {
+		intPart, fracPart = mantissa[:i], mantissa[i+1:]
+	}
+
+	digits := intPart + fracPart
+	if digits == "" {
+		return "", fmt.Errorf("malformed number %q", v)
+	}
+	for _, r := range digits {
+		if r < '0' || r > '9' {
+			return "", fmt.Errorf("malformed number %q", v)
+		}
+	}
+	if strings.Trim(digits, "0") == "" {
+		return "0", nil
+	}
+
+	point := len(intPart) + exp
+	for len(digits) > 1 && digits[0] == '0' {
+		digits, point = digits[1:], point-1
+	}
+	for len(digits) > point && len(digits) > 0 && digits[len(digits)-1] == '0' {
+		digits = digits[:len(digits)-1]
+	}
+
+	switch {
+	case point <= 0:
+		return sign + "0." + strings.Repeat("0", -point) + digits, nil
+	case point >= len(digits):
+		return sign + digits + strings.Repeat("0", point-len(digits)), nil
+	default:
+		return sign + digits[:point] + "." + digits[point:], nil
 	}
 }
