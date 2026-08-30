@@ -199,8 +199,8 @@ without a shared-state cleanup dance between them.
 
 - **Transaction atomicity.** Forward and inverse items either both appear or
   neither does.
-- **Direction isolation.** Given `USER#1 -> ORDER#5` and `SESSION#9 -> USER#1`,
-  `Out("USER#1")` returns only the order, `In("USER#1")` only the session. This is
+- **Direction isolation.** Given `user-1 -> order-5` and `session-9 -> user-1`,
+  `Out("user-1")` returns only the order, `In("user-1")` only the session. This is
   the regression test for direction living in the sort key prefix.
 - **Resolve-first upsert.** `Add` twice with different sort values leaves exactly
   one forward and one inverse item, not two of each.

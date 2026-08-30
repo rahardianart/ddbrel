@@ -92,7 +92,7 @@ DynamoDB's ordering, not the caller's.
 - **Rejected — type and ID only:** simplest key, but forfeits ordered queries and
   correct pagination.
 - **Rejected — sort component always required:** forces a filler value onto
-  relationships with no natural ordering (`USER#1 -> ROLE#admin`), and filler
+  relationships with no natural ordering (`user-1 -> role-admin`), and filler
   values become de-facto API surface that callers start depending on.
 
 ## Data Model
@@ -101,17 +101,24 @@ DynamoDB's ordering, not the caller's.
 
 ```
 PK = <node-id>
-SK = <DIR>#<LABEL>#<sort>#<id>        DIR is OUT or IN
+SK = <DIR>#<LABEL>#<sort>#<node-id>   DIR is OUT or IN
 ```
 
-`LABEL` defaults to the target's type, and is given explicitly when two
-relationships share endpoint types (`PLACED` and `VIEWED`, both `USER -> ORDER`).
+`LABEL` defaults to the empty label, and is given explicitly when two
+relationships share endpoint types (`PLACED` and `VIEWED`, both user to order).
+
+**Node IDs contain no `#`.** The delimiter is reserved, so IDs are opaque,
+delimiter-free strings (`user-1`, `order-5`) rather than the `TYPE#ID` convention
+common in single-table designs. The trailing sort key field is the *whole*
+counterpart node ID, which keeps the sort key at exactly four fields and the codec
+unambiguous. See *Type prefixes* under the hydrate API for what this means for
+`Registry`.
 
 ### Direction must live in the key
 
 A node's partition holds a mix of its own outgoing edges *and* the inverse items
-of edges pointing at it. Edge `USER#1 -> ORDER#5` writes an item at `PK=USER#1`;
-edge `SESSION#9 -> USER#1` also writes one at `PK=USER#1`.
+of edges pointing at it. Edge `user-1 -> order-5` writes an item at `PK=user-1`;
+edge `session-9 -> user-1` also writes one at `PK=user-1`.
 
 Direction is therefore a sort key prefix, not an attribute — attributes cannot be
 range-queried, so an attribute-based marker would require filtering after the read
@@ -119,23 +126,23 @@ and would break `Limit`.
 
 ### Item shapes
 
-Edge `USER#1 --PLACED--> ORDER#5` at `2026-08-30T12:04Z` writes both items in one
+Edge `user-1 --PLACED--> order-5` at `2026-08-30T12:04Z` writes both items in one
 `TransactWriteItems`:
 
 | PK | SK | Label | Node | Sort |
 |---|---|---|---|---|
-| `USER#1` | `OUT#PLACED#20260830T1204Z#5` | `PLACED` | `ORDER#5` | `20260830T1204Z` |
-| `ORDER#5` | `IN#PLACED#20260830T1204Z#1` | `PLACED` | `USER#1` | `20260830T1204Z` |
+| `user-1` | `OUT#PLACED#20260830T1204Z#order-5` | `PLACED` | `order-5` | `20260830T1204Z` |
+| `order-5` | `IN#PLACED#20260830T1204Z#user-1` | `PLACED` | `user-1` | `20260830T1204Z` |
 
-`Node` stores the sort-independent canonical target so callers never parse keys.
+`Node` stores the sort-independent counterpart so callers never parse keys.
 
 ### Access patterns
 
 | Pattern | Query |
 |---|---|
-| User's 20 newest orders | `PK=USER#1`, `begins_with(SK,"OUT#PLACED#")`, reverse, limit 20 |
-| Who placed order 5 | `PK=ORDER#5`, `begins_with(SK,"IN#PLACED#")` |
-| Orders in a date range | `PK=USER#1`, `SK BETWEEN "OUT#PLACED#<lo>" AND "OUT#PLACED#<hi>"` |
+| User's 20 newest orders | `PK=user-1`, `begins_with(SK,"OUT#PLACED#")`, reverse, limit 20 |
+| Who placed order 5 | `PK=order-5`, `begins_with(SK,"IN#PLACED#")` |
+| Orders in a date range | `PK=user-1`, `SK BETWEEN "OUT#PLACED#<lo>" AND "OUT#PLACED#<hi>"` |
 
 All are single `Query` calls on the base table, and all may set
 `ConsistentRead: true`.
@@ -143,13 +150,13 @@ All are single `Query` calls on the base table, and all may set
 ### Edge identity and the resolve-first upsert
 
 The sort value is part of the sort key, therefore part of the edge's identity.
-This has a consequence that is easy to miss: `Remove(ctx, "USER#1", "ORDER#5")`
+This has a consequence that is easy to miss: `Remove(ctx, "user-1", "order-5")`
 cannot construct either sort key, because neither contains a reconstructible sort
 value. The same gap makes a naive `Add` write a *second* forward item when called
 again with a different timestamp — a silent duplicate edge.
 
 **Resolution.** `Add` and `Remove` first issue a consistent `Query` against the
-target's `IN#` range (`PK=ORDER#5`, `begins_with(SK,"IN#PLACED#")` — a small
+target's `IN#` range (`PK=order-5`, `begins_with(SK,"IN#PLACED#")` — a small
 partition, since it holds one order's edges rather than the user's) to discover any
 existing sort value, then transact. This costs one extra round trip and makes `Add`
 a true upsert on `(from, label, to)`.
@@ -185,7 +192,7 @@ func (s *Store) RemoveAll(ctx context.Context, node string, o ...WriteOption) (r
 
 // Exact variants skip the resolve query — one round trip.
 func (s *Store) AddExact(ctx context.Context, from, to, sort string, o ...WriteOption) error
-func (s *Store) RemoveExact(ctx context.Context, from, to, sort string) error
+func (s *Store) RemoveExact(ctx context.Context, from, to, sort string, o ...WriteOption) error
 
 // Reads.
 func (s *Store) Out(ctx context.Context, node string, o ...QueryOption) (Page, error)
@@ -197,11 +204,29 @@ type Page struct {
 }
 ```
 
-Query options: `WithLabel`, `WithSortRange`, `WithLimit`, `WithReverse`,
-`WithCursor`, `WithConsistentRead`, `WithAttrs`.
+Options fall into four kinds, because they apply at different points:
+
+| Kind | Options | Applies to |
+|---|---|---|
+| `Option` | `WithKeyNames` | `New` |
+| `EdgeOption` | `WithLabel` | reads *and* writes — it names the relationship |
+| `WriteOption` | `WithSort`, `WithAttrs` | `Add`, `Remove`, `RemoveAll`, exact variants |
+| `QueryOption` | `WithSortRange`, `WithLimit`, `WithReverse`, `WithCursor`, `WithConsistentRead` | `Out`, `In` |
+
+`WithLabel` spans both directions deliberately: an edge is identified by
+`(from, label, to)`, so the label is needed to write one *and* to find it again.
+
+`WithSort` supplies the sort value on `Add`. `WithAttrs` is a write option rather
+than a query option — `Edge.Attrs` is write-side data, and queries always populate
+it from the item, so there is nothing to opt into on read. Attribute names that
+would collide with the reserved key attributes are rejected rather than silently
+overwritten.
 
 `Out` and `In` are separate methods rather than a direction argument. Direction is
 already baked into the key prefix, and two methods make call sites self-documenting.
+
+Sentinel errors: `ErrInvalidID`, `ErrCursorMismatch`. `TransactionError` carries
+the unwrapped `CancellationReason` list.
 
 ### `ddbrel/hydrate` — opt-in entity loading
 
@@ -211,6 +236,7 @@ not in the module graph.
 
 ```go
 type Registry struct{}
+type KeyFunc func(id string) map[string]types.AttributeValue
 
 func (r *Registry) Register(typ, table string, key KeyFunc)
 
@@ -220,7 +246,26 @@ type Result[T any] struct {
 }
 
 func All[T any](ctx context.Context, c *dynamodb.Client, r *Registry, edges []ddbrel.Edge) (Result[T], error)
+func Sweep(ctx context.Context, s *ddbrel.Store, edges []ddbrel.Edge, missing []string) (int, error)
 ```
+
+#### Type prefixes
+
+Because node IDs contain no `#`, there is no `TYPE#ID` convention to split on.
+`Register` therefore matches `typ` as a **prefix** of the node ID, longest match
+winning: `Register("order:", …)` claims `order:5`.
+
+This is a real constraint on ID naming — IDs must carry a prefix that identifies
+their type, and prefixes must not be ambiguous in a way longest-match resolves
+wrongly. It is the direct cost of banning the delimiter.
+
+A target matching no registered prefix is a **configuration error**
+(`ErrUnregisteredType`), not a `Missing` entry. `Missing` means the edge is
+dangling — the target's type is known and its table was queried, and the row was
+not there. Conflating the two would let a typo in `Register` read as data loss.
+
+`Sweep` turns a `Missing` list into `RemoveExact` calls, using each edge's known
+sort value so it costs no resolve query.
 
 ### Dangling edges
 
@@ -260,9 +305,11 @@ Reads default to eventually consistent — the standard, half-price default.
 `WithConsistentRead` opts in, and that option is *meaningful* here, which is the
 entire point of choosing dual items over a GSI.
 
-The one place it is not optional: the internal resolve-before-write query in `Add`
-and `Remove` forces `ConsistentRead: true`. Resolving a stale sort value is exactly
-how the duplicate edge that the upsert exists to prevent would be created.
+Three places are not optional. The internal resolve-before-write query in `Add`
+and `Remove` forces `ConsistentRead: true` — resolving a stale sort value is exactly
+how the duplicate edge that the upsert exists to prevent would be created. And
+`RemoveAll` forces it on its sweep query, because an eventually consistent sweep
+would report success while silently leaving stragglers behind.
 
 ## Testing
 
@@ -297,6 +344,18 @@ Documented rather than solved:
   partition. Write sharding is out of scope.
 - **`RemoveAll` is not atomic.** Inverse items live in other partitions, so it is a
   query followed by batched transactional deletes. It is idempotent and resumable
-  instead of atomic.
+  instead of atomic. It deduplicates by `(PK, SK)` within each transaction, because
+  a self-edge's two items are each other's counterparts and DynamoDB rejects
+  duplicate keys in a single transaction.
+
+- **Cardinality is not enforced.** Nothing prevents a second edge where the domain
+  wants one-to-one. There is no uniqueness primitive to build the constraint on.
+
+- **Ordering is nested under label.** `<sort>` sits below `<LABEL>` in the sort key,
+  so a query spanning labels interleaves by label and only then by sort value.
+  Global chronological ordering across labels is not expressible as one query;
+  it needs one query per label and an in-memory merge. Reversing the nesting to
+  `<DIR>#<sort>#<LABEL>#<node-id>` would trade this away for a more expensive
+  single-label query, which is the commoner case.
 - **Two round trips for hydrated reads.** Inherent to leaving entity tables
   untouched, and accepted when that trade was made.
